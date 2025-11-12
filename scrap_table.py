@@ -4,60 +4,57 @@ import boto3
 import uuid
 
 def lambda_handler(event, context):
-    # URL de la página web que contiene la tabla
-    url = "https://sgonorte.bomberosperu.gob.pe/24horas/?criterio=/"
+    url = "https://ultimosismo.igp.gob.pe/ultimo-sismo/sismos-reportados"
 
-    # Realizar la solicitud HTTP a la página web
-    response = requests.get(url)
+    response = requests.get(url, timeout=10)
     if response.status_code != 200:
         return {
             'statusCode': response.status_code,
             'body': 'Error al acceder a la página web'
         }
 
-    # Parsear el contenido HTML de la página web
     soup = BeautifulSoup(response.content, 'html.parser')
-
-    # Encontrar la tabla en el HTML
     table = soup.find('table')
+
     if not table:
         return {
             'statusCode': 404,
             'body': 'No se encontró la tabla en la página web'
         }
 
-    # Extraer los encabezados de la tabla
-    headers = [header.text for header in table.find_all('th')]
-
-    # Extraer las filas de la tabla
+    headers = [header.text.strip() for header in table.find_all('th')]
     rows = []
-    for row in table.find_all('tr')[1:]:  # Omitir el encabezado
+
+    for row in table.find_all('tr')[1:]:
         cells = row.find_all('td')
-        rows.append({headers[i+1]: cell.text for i, cell in enumerate(cells)})
+        if len(cells) == len(headers):
+            rows.append({headers[i]: cells[i].text.strip() for i in range(len(cells))})
 
-    # Guardar los datos en DynamoDB
+    # Solo los 10 últimos
+    rows = rows[:10]
+
+    if not rows:
+        return {
+            'statusCode': 500,
+            'body': 'No se encontraron datos de sismos'
+        }
+
+    # Guardar en DynamoDB
     dynamodb = boto3.resource('dynamodb')
-    table = dynamodb.Table('TablaWebScrapping')
+    table_db = dynamodb.Table('TablaWebScrapping')
 
-    # Eliminar todos los elementos de la tabla antes de agregar los nuevos
-    scan = table.scan()
-    with table.batch_writer() as batch:
-        for each in scan['Items']:
-            batch.delete_item(
-                Key={
-                    'id': each['id']
-                }
-            )
+    # Limpiar tabla antes de insertar nuevos
+    scan = table_db.scan()
+    with table_db.batch_writer() as batch:
+        for each in scan.get('Items', []):
+            batch.delete_item(Key={'id': each['id']})
 
-    # Insertar los nuevos datos
-    i = 1
-    for row in rows:
+    # Insertar nuevos
+    for i, row in enumerate(rows, start=1):
         row['#'] = i
-        row['id'] = str(uuid.uuid4())  # Generar un ID único para cada entrada
-        table.put_item(Item=row)
-        i = i + 1
+        row['id'] = str(uuid.uuid4())
+        table_db.put_item(Item=row)
 
-    # Retornar el resultado como JSON
     return {
         'statusCode': 200,
         'body': rows
